@@ -1,0 +1,383 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Market Intelligence Dashboard Infrastructure - EC2 instance running Streamlit
+  with CloudFront distribution for global access and HTTPS support.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name for resource naming
+    Default: market-intelligence
+  
+  Environment:
+    Type: String
+    Description: Deployment environment
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+  
+  InstanceType:
+    Type: String
+    Description: EC2 instance type for dashboard
+    Default: t3.small
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+  
+  KeyPairName:
+    Type: String
+    Description: EC2 Key Pair for SSH access (optional)
+    Default: ''
+  
+  AllowedSSHCIDR:
+    Type: String
+    Description: CIDR block allowed to SSH to EC2 instance
+    Default: 0.0.0.0/0
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+Resources:
+  # VPC and Networking
+  DashboardVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DashboardVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-${Environment}'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw-${Environment}'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DashboardVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DashboardVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-rt-${Environment}'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  DashboardSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-dashboard-sg-${Environment}'
+      GroupDescription: Security group for Streamlit dashboard EC2 instance
+      VpcId: !Ref DashboardVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          CidrIp: 0.0.0.0/0
+          Description: Streamlit dashboard access
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCIDR
+          Description: SSH access
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-dashboard-sg-${Environment}'
+
+  # IAM Role for EC2
+  DashboardEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dashboard-ec2-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: DynamoDBReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/market-analysis-market-insights-${Environment}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/market-analysis-market-insights-${Environment}/index/*'
+        - PolicyName: KMSDecryptAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: '*'
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - 'arn:aws:s3:::your-lambda-code-bucket-us-east-1'
+                  - 'arn:aws:s3:::your-lambda-code-bucket-us-east-1/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  DashboardInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-dashboard-profile-${Environment}'
+      Roles:
+        - !Ref DashboardEC2Role
+
+  # EC2 Instance
+  DashboardEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      IamInstanceProfile: !Ref DashboardInstanceProfile
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref DashboardSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Update system
+          yum update -y
+          
+          # Install Python 3.11
+          yum install -y python3.11 python3.11-pip git
+          
+          # Create app directory
+          mkdir -p /opt/dashboard
+          cd /opt/dashboard
+          
+          # Create requirements.txt
+          cat > requirements.txt << 'EOF'
+          streamlit==1.31.0
+          boto3==1.34.51
+          pandas==2.2.0
+          plotly==5.18.0
+          python-dateutil==2.8.2
+          EOF
+          
+          # Install Python dependencies
+          python3.11 -m pip install -r requirements.txt
+          
+          # Download app.py from S3 (if available)
+          echo "Checking for app.py in S3..."
+          if aws s3 ls s3://your-lambda-code-bucket-us-east-1/dashboard-app/app.py 2>/dev/null; then
+            echo "Downloading app.py from S3..."
+            aws s3 cp s3://your-lambda-code-bucket-us-east-1/dashboard-app/app.py /opt/dashboard/app.py
+            chown ec2-user:ec2-user /opt/dashboard/app.py
+            chmod 644 /opt/dashboard/app.py
+            echo "app.py downloaded successfully"
+          else
+            echo "app.py not found in S3, creating placeholder..."
+            cat > /opt/dashboard/app.py << 'EOFAPP'
+          import streamlit as st
+          
+          st.title("Market Intelligence Dashboard")
+          st.warning("Dashboard is being deployed. Please wait a few minutes and refresh.")
+          st.info("The app.py file will be automatically downloaded from S3 once uploaded.")
+          EOFAPP
+            chown ec2-user:ec2-user /opt/dashboard/app.py
+            chmod 644 /opt/dashboard/app.py
+          fi
+          
+          # Create systemd service
+          cat > /etc/systemd/system/streamlit-dashboard.service << 'EOF'
+          [Unit]
+          Description=Streamlit Market Intelligence Dashboard
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/opt/dashboard
+          Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+          ExecStart=/usr/local/bin/streamlit run app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Set permissions
+          chown -R ec2-user:ec2-user /opt/dashboard
+          
+          # Enable and start service
+          systemctl daemon-reload
+          systemctl enable streamlit-dashboard
+          systemctl start streamlit-dashboard
+          
+          # Wait for service to start
+          sleep 5
+          
+          # Check service status
+          systemctl status streamlit-dashboard --no-pager || true
+          
+          # Signal completion
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DashboardEC2Instance --region ${AWS::Region}
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-dashboard-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+
+  # CloudFront Distribution
+  DashboardCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'Market Intelligence Dashboard - ${Environment}'
+        DefaultCacheBehavior:
+          TargetOriginId: EC2Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+            Headers:
+              - '*'
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+        Origins:
+          - Id: EC2Origin
+            DomainName: !GetAtt DashboardEC2Instance.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8501
+              OriginProtocolPolicy: http-only
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+  EC2InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref DashboardEC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2InstanceId'
+
+  EC2PublicIP:
+    Description: EC2 Instance Public IP
+    Value: !GetAtt DashboardEC2Instance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2PublicIP'
+
+  EC2PublicDNS:
+    Description: EC2 Instance Public DNS
+    Value: !GetAtt DashboardEC2Instance.PublicDnsName
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2PublicDNS'
+
+  DashboardDirectURL:
+    Description: Direct URL to access dashboard (HTTP)
+    Value: !Sub 'http://${DashboardEC2Instance.PublicDnsName}:8501'
+
+  CloudFrontURL:
+    Description: CloudFront URL to access dashboard (HTTPS)
+    Value: !Sub 'https://${DashboardCloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontURL'
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref DashboardCloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDistributionId'
+
+  DeploymentInstructions:
+    Description: Instructions to deploy dashboard code
+    Value: !Sub |
+      1. SSH to EC2: ssh -i your-key.pem ec2-user@${DashboardEC2Instance.PublicDnsName}
+      2. Copy app.py to /opt/dashboard/app.py
+      3. Restart service: sudo systemctl restart streamlit-dashboard
+      4. Access via CloudFront: https://${DashboardCloudFrontDistribution.DomainName}

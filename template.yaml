@@ -1,0 +1,636 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Market Analysis Pipeline - Serverless infrastructure for automated market document processing.
+  This template provisions S3 storage, Lambda functions, DynamoDB table, and integrations with
+  AWS Textract and Bedrock for AI-powered market analysis.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Project Configuration
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: Storage Configuration
+        Parameters:
+          - MarketBucketName
+          - DynamoDBTableName
+          - LambdaCodeBucket
+      - Label:
+          default: Lambda Configuration
+        Parameters:
+          - OrchestratorMemorySize
+          - OrchestratorTimeout
+          - ParserMemorySize
+          - ParserTimeout
+      - Label:
+          default: Notification Configuration
+        Parameters:
+          - AlertEmail
+
+    ParameterLabels:
+      ProjectName:
+        default: Project Name
+      MarketBucketName:
+        default: S3 Bucket Name for Market
+      DynamoDBTableName:
+        default: DynamoDB Table Name
+      LambdaCodeBucket:
+        default: S3 Bucket for Lambda Code
+      Environment:
+        default: Environment
+      OrchestratorMemorySize:
+        default: Orchestrator Lambda Memory (MB)
+      OrchestratorTimeout:
+        default: Orchestrator Lambda Timeout (seconds)
+      ParserMemorySize:
+        default: Parser Lambda Memory (MB)
+      ParserTimeout:
+        default: Parser Lambda Timeout (seconds)
+      AlertEmail:
+        default: Alert Email Address
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project name used for resource naming and tagging
+    Default: market-analysis
+    MinLength: 3
+    MaxLength: 30
+    AllowedPattern: ^[a-z0-9-]+$
+
+  MarketBucketName:
+    Type: String
+    Description: Name for the S3 bucket that stores market documents (must be globally unique)
+    Default: ''
+    AllowedPattern: ^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+
+  DynamoDBTableName:
+    Type: String
+    Description: Name for the DynamoDB table that stores market insights
+    Default: market-insights
+    MinLength: 3
+    MaxLength: 255
+
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+    Default: your-lambda-code-bucket-us-east-1
+
+  Environment:
+    Type: String
+    Description: Deployment environment (dev, test, prod)
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  OrchestratorMemorySize:
+    Type: Number
+    Description: Memory allocation for Orchestrator Lambda (MB)
+    Default: 512
+    MinValue: 128
+    MaxValue: 10240
+
+  OrchestratorTimeout:
+    Type: Number
+    Description: Timeout for Orchestrator Lambda (seconds)
+    Default: 300
+    MinValue: 3
+    MaxValue: 900
+
+  ParserMemorySize:
+    Type: Number
+    Description: Memory allocation for Parser Lambda (MB)
+    Default: 256
+    MinValue: 128
+    MaxValue: 10240
+
+  ParserTimeout:
+    Type: Number
+    Description: Timeout for Parser Lambda (seconds)
+    Default: 60
+    MinValue: 3
+    MaxValue: 900
+
+  AlertEmail:
+    Type: String
+    Description: Email address for critical error notifications (optional)
+    Default: ''
+    AllowedPattern: ^$|^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+
+Conditions:
+  HasCustomBucketName: !Not [!Equals [!Ref MarketBucketName, '']]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+  IsProduction: !Equals [!Ref Environment, 'prod']
+
+Resources:
+  # KMS Key for S3 Bucket Encryption
+  MarketBucketKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for encrypting market documents in ${ProjectName}-${Environment}'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  MarketBucketKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${Environment}-market-bucket'
+      TargetKeyId: !Ref MarketBucketKMSKey
+
+  # S3 Bucket for Market Documents
+  MarketBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - HasCustomBucketName
+        - !Ref MarketBucketName
+        - !Sub '${ProjectName}-markets-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt MarketBucketKMSKey.Arn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveProcessedMarket
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Market document storage
+
+  # KMS Key for DynamoDB Table Encryption
+  MarketInsightsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for encrypting market insights in ${ProjectName}-${Environment}'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow DynamoDB to use the key
+            Effect: Allow
+            Principal:
+              Service: dynamodb.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+              - 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                'kms:CallerAccount': !Ref AWS::AccountId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  MarketInsightsKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${Environment}-market-insights'
+      TargetKeyId: !Ref MarketInsightsKMSKey
+
+  # DynamoDB Table for Market Insights
+  MarketInsightsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-${DynamoDBTableName}-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: insightId
+          AttributeType: S
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: uploadTimestamp
+          AttributeType: N
+        - AttributeName: partyName
+          AttributeType: S
+        - AttributeName: effectiveDate
+          AttributeType: S
+      KeySchema:
+        - AttributeName: insightId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: DocumentIdIndex
+          KeySchema:
+            - AttributeName: documentId
+              KeyType: HASH
+            - AttributeName: uploadTimestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: PartyNameIndex
+          KeySchema:
+            - AttributeName: partyName
+              KeyType: HASH
+            - AttributeName: uploadTimestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: EffectiveDateIndex
+          KeySchema:
+            - AttributeName: effectiveDate
+              KeyType: HASH
+            - AttributeName: uploadTimestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref MarketInsightsKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProduction, true, false]
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Market insights storage
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  # IAM Role for Orchestrator Lambda Function
+  OrchestratorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-orchestrator-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: S3MarketBucketReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:HeadObject'
+                Resource: !If
+                    - HasCustomBucketName
+                    - !Sub 'arn:aws:s3:::${MarketBucketName}/*'
+                    - !Sub 'arn:aws:s3:::${ProjectName}-markets-${Environment}-${AWS::AccountId}/*'
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource: !If
+                    - HasCustomBucketName
+                    - !Sub 'arn:aws:s3:::${MarketBucketName}'
+                    - !Sub 'arn:aws:s3:::${ProjectName}-markets-${Environment}-${AWS::AccountId}'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:DescribeKey'
+                Resource: !GetAtt MarketBucketKMSKey.Arn
+        - PolicyName: TextractServiceAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'textract:DetectDocumentText'
+                  - 'textract:StartDocumentTextDetection'
+                  - 'textract:GetDocumentTextDetection'
+                Resource: '*'
+        - PolicyName: BedrockServiceAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                Resource: '*'
+        - PolicyName: ParserLambdaInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-parser-lambda-${Environment}'
+        - PolicyName: CloudWatchMetricsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:PutMetricData'
+                Resource: '*'
+        - PolicyName: SNSPublishAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sns:Publish'
+                Resource: !Ref CriticalErrorTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Orchestrator Lambda execution role
+
+  # IAM Role for Parser Lambda Function
+  ParserLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-parser-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: DynamoDBWriteAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                Resource: !GetAtt MarketInsightsTable.Arn
+        - PolicyName: KMSEncryptAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:DescribeKey'
+                  - 'kms:Encrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt MarketInsightsKMSKey.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Parser Lambda execution role
+
+  # Orchestrator Lambda Function
+  OrchestratorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-orchestrator-lambda-${Environment}'
+      Runtime: python3.11
+      Handler: orchestrator_lambda.lambda_handler
+      Role: !GetAtt OrchestratorLambdaRole.Arn
+      MemorySize: !Ref OrchestratorMemorySize
+      Timeout: !Ref OrchestratorTimeout
+      Environment:
+        Variables:
+          PARSER_LAMBDA_ARN: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-parser-lambda-${Environment}'
+          SNS_TOPIC_ARN: !Ref CriticalErrorTopic
+          ENVIRONMENT: !Ref Environment
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: lambda/orchestrator.zip
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Market analysis orchestration
+
+  # Parser Lambda Function
+  ParserLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-parser-lambda-${Environment}'
+      Runtime: python3.11
+      Handler: parser_lambda.lambda_handler
+      Role: !GetAtt ParserLambdaRole.Arn
+      MemorySize: !Ref ParserMemorySize
+      Timeout: !Ref ParserTimeout
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref MarketInsightsTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: lambda/parser.zip
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Market analysis output parsing
+
+  # Lambda permission for S3 to invoke Orchestrator Lambda
+  OrchestratorLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OrchestratorLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt MarketBucket.Arn
+
+  # Lambda permission for Orchestrator Lambda to invoke Parser Lambda
+  ParserLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ParserLambda
+      Action: lambda:InvokeFunction
+      Principal: lambda.amazonaws.com
+      SourceArn: !GetAtt OrchestratorLambda.Arn
+
+  # SNS Topic for Critical Error Notifications
+  CriticalErrorTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-critical-errors-${Environment}'
+      DisplayName: !Sub 'Market Analysis Pipeline Critical Errors (${Environment})'
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: Critical error notifications
+
+  # SNS Topic Policy
+  CriticalErrorTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref CriticalErrorTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLambdaPublish
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - 'sns:Publish'
+            Resource: !Ref CriticalErrorTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: AllowAccountOwnerManagement
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action:
+              - 'sns:Subscribe'
+              - 'sns:SetTopicAttributes'
+              - 'sns:RemovePermission'
+              - 'sns:Receive'
+              - 'sns:Publish'
+              - 'sns:ListSubscriptionsByTopic'
+              - 'sns:GetTopicAttributes'
+              - 'sns:DeleteTopic'
+              - 'sns:AddPermission'
+            Resource: !Ref CriticalErrorTopic
+
+  # Email Subscription for Critical Errors
+  CriticalErrorEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      Protocol: email
+      TopicArn: !Ref CriticalErrorTopic
+      Endpoint: !Ref AlertEmail
+
+Outputs:
+  TemplateVersion:
+    Description: CloudFormation template version
+    Value: '1.0.0'
+
+  Environment:
+    Description: Deployment environment
+    Value: !Ref Environment
+
+  ProjectName:
+    Description: Project name
+    Value: !Ref ProjectName
+
+  MarketBucketName:
+    Description: Name of the S3 bucket for market documents
+    Value: !Ref MarketBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-MarketBucketName'
+
+  MarketBucketArn:
+    Description: ARN of the S3 bucket for market documents
+    Value: !GetAtt MarketBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MarketBucketArn'
+
+  MarketInsightsTableName:
+    Description: Name of the DynamoDB table for market insights
+    Value: !Ref MarketInsightsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-MarketInsightsTableName'
+
+  MarketInsightsTableArn:
+    Description: ARN of the DynamoDB table for market insights
+    Value: !GetAtt MarketInsightsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MarketInsightsTableArn'
+
+  OrchestratorLambdaArn:
+    Description: ARN of the Orchestrator Lambda function
+    Value: !GetAtt OrchestratorLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-OrchestratorLambdaArn'
+
+  ParserLambdaArn:
+    Description: ARN of the Parser Lambda function
+    Value: !GetAtt ParserLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ParserLambdaArn'
+
+  CriticalErrorTopicArn:
+    Description: ARN of the SNS topic for critical error notifications
+    Value: !Ref CriticalErrorTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-CriticalErrorTopicArn'
