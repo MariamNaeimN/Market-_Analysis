@@ -124,21 +124,9 @@ def main():
     st.markdown('<div class="main-header">📊 Market Intelligence Dashboard</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Real-time competitive intelligence and market insights</div>', unsafe_allow_html=True)
 
-    # Auto-refresh: check for new items every 30 seconds
-    import time
-    if 'last_count' not in st.session_state:
-        st.session_state.last_count = 0
-
     with st.spinner('Loading...'):
         items = load_insights()
         insights = parse_insights(items)
-
-    # Detect new items and auto-refresh
-    current_count = len(insights)
-    if st.session_state.last_count > 0 and current_count != st.session_state.last_count:
-        st.session_state.last_count = current_count
-        st.cache_data.clear()
-    st.session_state.last_count = current_count
 
     if not insights:
         st.warning("No insights found. Upload documents to S3 to generate market intelligence.")
@@ -198,12 +186,6 @@ def main():
     with tab3: show_financial(filtered)
     with tab4: show_risks(filtered)
     with tab5: show_documents(filtered)
-
-    # Auto-refresh page every 30 seconds to pick up new data
-    st.markdown(
-        '<meta http-equiv="refresh" content="30">',
-        unsafe_allow_html=True
-    )
 
 def show_overview(insights):
     st.markdown("### Market Intelligence Overview")
