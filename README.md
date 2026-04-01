@@ -7,7 +7,7 @@ An automated, serverless AWS pipeline for processing and analyzing market intell
 This project provides an end-to-end solution for market intelligence automation:
 
 - **Automated Processing**: Upload documents to S3 and trigger automatic analysis
-- **AI-Powered Analysis**: Uses AWS Bedrock (Claude 3.5 Sonnet) to extract market insights
+- **AI-Powered Analysis**: Uses AWS Bedrock (Claude Sonnet 4) to extract market insights
 - **Structured Storage**: Stores insights in DynamoDB with multiple query indexes
 - **Real-Time Dashboard**: Streamlit-based web interface for exploring insights
 - **Infrastructure as Code**: Complete CloudFormation templates for reproducible deployments
@@ -151,7 +151,7 @@ streamlit run app.py
 
 ```bash
 # Upload a document to S3
-aws s3 cp sample_contracts/competitor_report_q1_2024.txt s3://your-bucket-name/
+aws s3 cp sample_docs/competitor_report_q1_2024.txt s3://your-bucket-name/
 
 # The pipeline will automatically:
 # 1. Extract text using Textract
@@ -227,28 +227,45 @@ Key parameters you can customize during deployment:
 
 ```
 .
-├── template.yaml                    # Main CloudFormation template
-├── template-s3.yaml                 # S3-specific template
+├── IAC/
+│   ├── template.yaml                # Main CloudFormation template (Lambda pipeline)
+│   └── dashboard-infrastructure.yaml # Dashboard EC2/CloudFront infrastructure
 ├── deployment-package/
 │   ├── orchestrator_lambda.py       # Orchestration Lambda function
 │   └── parser_lambda.py             # Parser Lambda function
 ├── dashboard/
+│   ├── .streamlit/
+│   │   └── config.toml              # Streamlit dark theme configuration
 │   ├── app.py                       # Streamlit dashboard application
 │   ├── requirements.txt             # Python dependencies
 │   └── README.md                    # Dashboard documentation
-├── sample_contracts/                # Sample documents for testing
+├── sample_docs/                     # Sample market intelligence documents
+│   ├── ai_infrastructure_competitive_report.txt
+│   ├── competitive_intelligence_facebook.txt
 │   ├── competitor_report_q1_2024.txt
+│   ├── cybersecurity_market_q2_2024.txt
+│   ├── data_analytics_platforms_2024.txt
+│   ├── devops_toolchain_market_2024.txt
+│   ├── ecommerce_platform_analysis_2024.txt
+│   ├── edge_computing_iot_market_2024.txt
+│   ├── fintech_payments_landscape_2024.txt
+│   ├── green_tech_sustainability_market_2024.txt
+│   ├── healthcare_saas_competitive_2024.txt
+│   ├── hr_tech_workforce_platforms_2024.txt
 │   ├── saas_market_analysis_2024.txt
-│   └── tech_startup_funding_news.txt
-├── deploy.ps1                       # Main deployment script
-├── deploy-dashboard.ps1             # Dashboard deployment script
-├── copy-app-to-ec2.ps1             # EC2 deployment helper
-├── dashboard-infrastructure.yaml    # Dashboard EC2 infrastructure
-└── Tasks/specs/                     # Project specifications
-    └── contract-analysis-pipeline/
-        ├── requirements.md          # Requirements document
-        ├── design.md                # Design document
-        └── tasks.md                 # Implementation tasks
+│   ├── tech_startup_funding_news.txt
+│   └── README.md
+├── Tasks/specs/                     # Project specifications
+│   └── contract-analysis-pipeline/
+│       ├── .config.kiro
+│       ├── requirements.md
+│       ├── design.md
+│       └── tasks.md
+├── deploy.ps1                       # Main pipeline deployment script
+├── deploy-dashboard.ps1             # Dashboard EC2 deployment script
+├── copy-app-to-ec2.ps1             # Copy dashboard app to EC2 via SSM
+├── .gitignore
+└── README.md
 ```
 
 ## Security
@@ -292,16 +309,27 @@ Critical errors trigger SNS notifications to the configured email address.
 
 ### Sample Documents
 
-The `sample_contracts/` directory contains test documents:
-- `competitor_report_q1_2024.txt`: Quarterly competitor analysis
-- `saas_market_analysis_2024.txt`: SaaS market trends
+The `sample_docs/` directory contains 14 market intelligence documents covering:
+- `competitor_report_q1_2024.txt`: Quarterly competitor analysis (cloud services)
+- `saas_market_analysis_2024.txt`: SaaS market trends and competitive landscape
 - `tech_startup_funding_news.txt`: Startup funding announcements
+- `competitive_intelligence_facebook.txt`: Meta/Facebook competitive intelligence
+- `cybersecurity_market_q2_2024.txt`: Cybersecurity market analysis
+- `ai_infrastructure_competitive_report.txt`: AI infrastructure competitive report
+- `ecommerce_platform_analysis_2024.txt`: E-commerce platform market
+- `devops_toolchain_market_2024.txt`: DevOps toolchain market
+- `healthcare_saas_competitive_2024.txt`: Healthcare SaaS market
+- `fintech_payments_landscape_2024.txt`: FinTech payments landscape
+- `data_analytics_platforms_2024.txt`: Data analytics platforms
+- `edge_computing_iot_market_2024.txt`: Edge computing and IoT market
+- `hr_tech_workforce_platforms_2024.txt`: HR tech and workforce platforms
+- `green_tech_sustainability_market_2024.txt`: Green tech and sustainability
 
 ### Upload Test Documents
 
 ```bash
 # Upload all sample documents
-aws s3 cp sample_contracts/ s3://your-bucket-name/ --recursive --exclude "README.md"
+aws s3 cp sample_docs/ s3://your-bucket-name/ --recursive --exclude "README.md"
 ```
 
 ### Verify Processing
