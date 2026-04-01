@@ -26,7 +26,7 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 SYNC_THRESHOLD_MB = 1
 SYNC_THRESHOLD_BYTES = SYNC_THRESHOLD_MB * 1024 * 1024
 MAX_RETRIES = 3
-BEDROCK_MODEL_ID = 'us.anthropic.claude-3-5-sonnet-20241022-v2:0'
+BEDROCK_MODEL_ID = 'us.anthropic.claude-sonnet-4-20250514-v1:0'
 BEDROCK_TIMEOUT = 30
 
 def lambda_handler(event, context):
@@ -284,7 +284,10 @@ Return the analysis as a JSON object with the following structure:
   ],
   "dates": {{
     "effectiveDate": "YYYY-MM-DD or null (primary date of document/event)",
-    "terminationDate": "YYYY-MM-DD or null (end date if applicable)"
+    "terminationDate": "YYYY-MM-DD or null (end date if applicable)",
+    "keyDates": [
+      {{"date": "YYYY-MM-DD", "event": "Description of the event or milestone"}}
+    ]
   }},
   "paymentTerms": [
     {{"description": "Financial metric description (revenue, funding, pricing, etc.)", "amount": "Amount with currency or null"}}
@@ -293,7 +296,7 @@ Return the analysis as a JSON object with the following structure:
     {{"party": "Company Name", "obligation": "Strategic initiative or commitment"}}
   ],
   "risks": [
-    {{"type": "Risk/Opportunity type", "description": "Detailed description of market risk or opportunity"}}
+    {{"type": "Risk or Opportunity", "riskType": "Category such as Regulatory, Competition, Financial, Technology, Market, Operational, etc.", "severity": "High/Medium/Low (for risks only)", "potential": "High/Medium/Low (for opportunities only)", "description": "Detailed description of market risk or opportunity"}}
   ]
 }}
 

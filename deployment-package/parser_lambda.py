@@ -150,9 +150,9 @@ def transform_to_dynamodb_schema(
     parties = analysis_results.get('parties', [])
     party_name = extract_primary_party_name(parties)
     
-    # Extract effective date for indexing
+    # Extract effective date for indexing (must be a string for GSI key, never None/null)
     dates = analysis_results.get('dates', {})
-    effective_date = dates.get('effectiveDate', 'unknown')
+    effective_date = dates.get('effectiveDate') or 'unknown'
     
     # Build DynamoDB item
     item = {

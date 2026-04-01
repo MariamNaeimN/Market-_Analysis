@@ -1,0 +1,79 @@
+Competitive Intelligence Report: Edge Computing and IoT Market 2024
+Report Date: 2024-05-20
+Effective Date: 2024-05-20
+Prepared by: Market Intelligence Division
+
+EXECUTIVE SUMMARY
+
+The edge computing market reached $62 billion in 2024, growing at 35% CAGR. Industrial IoT, autonomous systems, and 5G private networks are driving demand for distributed compute infrastructure. This report analyzes competitive positioning among edge platform providers.
+
+KEY PARTIES AND MARKET POSITIONS
+
+1. Amazon Web Services (Outposts/Wavelength) - Cloud Edge Leader
+   Role: Extending AWS infrastructure to edge locations
+   Edge Revenue: $4.2 billion (estimated)
+   Outposts Deployments: 5,000+ globally
+
+2. Microsoft Azure (IoT/Edge) - Enterprise IoT Platform
+   Role: Comprehensive IoT and edge computing suite
+   IoT Revenue: $3.8 billion (estimated)
+   Azure IoT Hub Devices: 500 million+ connected
+
+3. Fastly Inc. - Edge Cloud Platform
+   Role: Edge compute and CDN for developer-focused workloads
+   Market Cap: $3.2 billion
+   Revenue: $520 million (12% YoY growth)
+
+4. Cloudflare Inc. - Edge Network Platform
+   Role: Global edge network with Workers compute platform
+   Market Cap: $32 billion
+   Revenue: $1.6 billion (32% YoY growth)
+   Customers: 185,000+ paying
+
+5. PTC Inc. - Industrial IoT Platform
+   Role: Leading platform for manufacturing and industrial IoT
+   Market Cap: $18 billion
+   Revenue: $2.1 billion (IoT segment: $680 million)
+
+FINANCIAL PERFORMANCE AND PRICING
+
+Edge Compute Pricing:
+- AWS Outposts: Starting at $7,500/month (42U rack)
+- Azure Stack Edge: $2,500-$12,000/month per device
+- Cloudflare Workers: $0.30/million requests + $0.02/GB-second
+- Fastly Compute: $0.50/million requests + $0.03/GB-second
+- AWS Wavelength: Standard EC2 pricing + carrier fees
+
+IoT Platform Pricing:
+- AWS IoT Core: $1/million messages
+- Azure IoT Hub: $25/month (S1) to $2,500/month (S3)
+- PTC ThingWorx: $30,000-$200,000/year
+- Siemens MindSphere: $1,200/month base
+
+STRATEGIC INITIATIVES
+
+1. 5G Private Networks
+   Enterprise 5G deployments enabling ultra-low latency edge applications. AWS, Azure, and Nokia partnering for private 5G-edge solutions in manufacturing and logistics.
+   Timeline: 25% of large manufacturers deploying by 2025
+
+2. Edge AI Inference
+   Running ML models at the edge for real-time decision making. NVIDIA Jetson, Intel OpenVINO, and Qualcomm AI Engine competing for edge AI silicon market.
+   Timeline: Edge AI market reaching $15 billion by 2025
+
+3. Digital Twin Integration
+   Connecting physical assets to digital representations via edge sensors. AWS IoT TwinMaker, Azure Digital Twins, and PTC Vuforia leading enterprise adoption.
+   Timeline: 50% of large manufacturers using digital twins by 2025
+
+MARKET RISKS AND OPPORTUNITIES
+
+Risks:
+1. Infrastructure Complexity - Managing distributed edge deployments at scale. Severity: High
+2. Security at the Edge - Expanded attack surface with distributed compute nodes. Severity: High
+3. Standardization Gaps - Lack of unified edge computing standards. Severity: Medium
+
+Opportunities:
+1. Autonomous Vehicles - $45 billion edge compute opportunity for automotive. Potential: High
+2. Smart Manufacturing - $18 billion market for Industry 4.0 edge solutions. Potential: High
+3. Retail Edge Analytics - $6 billion market for in-store AI and analytics. Potential: Medium-High
+
+Document Classification: Competitive Intelligence - Internal Use

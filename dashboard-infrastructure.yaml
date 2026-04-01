@@ -177,6 +177,8 @@ Resources:
                 Resource:
                   - 'arn:aws:s3:::your-lambda-code-bucket-us-east-1'
                   - 'arn:aws:s3:::your-lambda-code-bucket-us-east-1/*'
+                  - !Sub 'arn:aws:s3:::market-analysis-markets-${Environment}-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::market-analysis-markets-${Environment}-${AWS::AccountId}/*'
       Tags:
         - Key: Environment
           Value: !Ref Environment
