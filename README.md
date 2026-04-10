@@ -7,9 +7,9 @@ An automated, serverless AWS pipeline for processing and analyzing market intell
 This project provides an end-to-end solution for market intelligence automation:
 
 - **Automated Processing**: Upload documents to S3 and trigger automatic analysis
-- **AI-Powered Analysis**: Uses AWS Bedrock (Claude Sonnet 4) to extract market insights
+- **AI-Powered Analysis**: Uses AWS Bedrock (Claude 3 Haiku) to extract market insights
 - **Structured Storage**: Stores insights in DynamoDB with multiple query indexes
-- **Real-Time Dashboard**: Streamlit-based web interface for exploring insights
+- **Real-Time Dashboard**: Streamlit-based web interface with WebSocket push updates
 - **Infrastructure as Code**: Complete CloudFormation templates for reproducible deployments
 
 ## Architecture
@@ -17,13 +17,13 @@ This project provides an end-to-end solution for market intelligence automation:
 ```
 ┌─────────────┐      ┌──────────────────┐      ┌─────────────┐
 │   S3 Bucket │─────▶│ Orchestrator     │─────▶│ AWS Textract│
-│  (Upload)   │      │ Lambda           │      │             │
+│  (Upload)   │      │ Lambda           │      │ (PDF/Image) │
 └─────────────┘      └──────────────────┘      └─────────────┘
                               │                        │
                               ▼                        │
                      ┌─────────────────┐              │
                      │  AWS Bedrock    │◀─────────────┘
-                     │  (Claude 3.5)   │
+                     │ (Claude Haiku)  │
                      └─────────────────┘
                               │
                               ▼
@@ -32,31 +32,42 @@ This project provides an end-to-end solution for market intelligence automation:
                      └─────────────────┘
                               │
                               ▼
-                     ┌─────────────────┐      ┌──────────────┐
-                     │   DynamoDB      │◀─────│  Dashboard   │
-                     │   (Insights)    │      │  (Streamlit) │
-                     └─────────────────┘      └──────────────┘
+                     ┌─────────────────┐  Stream   ┌──────────────┐
+                     │   DynamoDB      │──────────▶│  Notifier    │
+                     │   (Insights)    │           │  Lambda      │
+                     └────────┬────────┘           └──────┬───────┘
+                              │                           │
+                         reads data               push "reload"
+                              │                    via WebSocket
+                              ▼                           │
+                     ┌──────────────────────────────────┐ │
+                     │  Streamlit Dashboard (EC2)       │◀┘
+                     │  CloudFront (HTTPS)              │
+                     └──────────────────────────────────┘
 ```
 
 ### Components
 
 1. **S3 Bucket**: Entry point for document uploads with event notifications
-2. **Orchestrator Lambda**: Coordinates workflow, manages Textract and Bedrock interactions
-3. **AWS Textract**: Extracts text from PDF and image documents
-4. **AWS Bedrock**: AI-powered analysis using Claude 3.5 Sonnet model
+2. **Orchestrator Lambda**: Coordinates workflow — Textract for PDFs/images, direct read for text files, Bedrock for analysis
+3. **AWS Textract**: Extracts text from PDF and image documents (sync for small, async for large)
+4. **AWS Bedrock**: AI-powered analysis using Claude 3 Haiku (temperature 0.0 for strict extraction)
 5. **Parser Lambda**: Validates, transforms, and stores analysis results
-6. **DynamoDB Table**: Stores structured insights with GSI indexes for querying
-7. **Streamlit Dashboard**: Web-based UI for exploring and visualizing insights
+6. **DynamoDB Table**: Stores structured insights with GSI indexes and DynamoDB Streams enabled
+7. **WebSocket API Gateway**: Pushes real-time notifications to dashboard on insert/modify/delete
+8. **Streamlit Dashboard**: Web-based UI on EC2 behind CloudFront with file upload support
 
 ## Features
 
 ### Document Processing
-- Supports PDF, PNG, JPEG, TIFF, and TXT formats
-- Automatic text extraction using AWS Textract
+- Accepts any file format — text files read directly, PDFs/images via Textract
+- Textract fallback: sync API for small files, async for large, raw read if both fail
 - Handles documents up to 10MB
-- Asynchronous processing for large files (>1MB)
+- Upload via S3 CLI or directly from the dashboard sidebar
 
 ### AI Analysis
+- Uses Claude 3 Haiku for fast structured extraction (~5-8s per document)
+- Temperature 0.0 — only extracts data explicitly stated in the document
 - Identifies competitors and market players
 - Extracts key dates (launches, announcements, events)
 - Captures financial metrics (revenue, funding, pricing)
@@ -72,20 +83,27 @@ This project provides an end-to-end solution for market intelligence automation:
 - Point-in-time recovery for production environments
 
 ### Dashboard Features
-- Real-time data visualization
-- Competitor intelligence tracking
+- Dark theme with real-time WebSocket push updates
+- File upload directly from the sidebar
+- Competitor intelligence tracking with mention counts
 - Financial metrics analysis
-- Risk and opportunity assessment
+- Risk/Opportunity type distribution and analysis
 - Document explorer with detailed views
-- Interactive filters and date range selection
+- Searchable document filter with select all toggle
+- Deployed on EC2 behind CloudFront (HTTPS)
+
+### Real-Time Updates
+- DynamoDB Streams triggers a notifier Lambda on insert/modify/delete
+- WebSocket API Gateway pushes notifications to connected dashboard clients
+- Dashboard auto-reloads when new data arrives — no manual refresh needed
 
 ## Prerequisites
 
 - AWS Account with appropriate permissions
 - AWS CLI installed and configured
-- Python 3.11 or higher
+- Python 3.9 or higher
 - PowerShell (for deployment scripts)
-- Streamlit (for dashboard)
+- Streamlit 1.37+ (for dashboard with fragment support)
 
 ## Installation
 
@@ -229,41 +247,29 @@ Key parameters you can customize during deployment:
 .
 ├── IAC/
 │   ├── template.yaml                # Main CloudFormation template (Lambda pipeline)
-│   └── dashboard-infrastructure.yaml # Dashboard EC2/CloudFront infrastructure
+│   ├── dashboard-infrastructure.yaml # Dashboard EC2/CloudFront infrastructure
+│   └── websocket-infrastructure.yaml # WebSocket API Gateway + notifier Lambda
 ├── deployment-package/
-│   ├── orchestrator_lambda.py       # Orchestration Lambda function
-│   └── parser_lambda.py             # Parser Lambda function
+│   ├── orchestrator_lambda.py       # Orchestration Lambda (Textract + Bedrock)
+│   └── parser_lambda.py             # Parser Lambda (DynamoDB writer)
 ├── dashboard/
 │   ├── .streamlit/
 │   │   └── config.toml              # Streamlit dark theme configuration
 │   ├── app.py                       # Streamlit dashboard application
-│   ├── requirements.txt             # Python dependencies
+│   ├── requirements.txt             # Python dependencies (streamlit>=1.37)
 │   └── README.md                    # Dashboard documentation
-├── sample_docs/                     # Sample market intelligence documents
-│   ├── ai_infrastructure_competitive_report.txt
-│   ├── competitive_intelligence_facebook.txt
-│   ├── competitor_report_q1_2024.txt
-│   ├── cybersecurity_market_q2_2024.txt
-│   ├── data_analytics_platforms_2024.txt
-│   ├── devops_toolchain_market_2024.txt
-│   ├── ecommerce_platform_analysis_2024.txt
-│   ├── edge_computing_iot_market_2024.txt
-│   ├── fintech_payments_landscape_2024.txt
-│   ├── green_tech_sustainability_market_2024.txt
-│   ├── healthcare_saas_competitive_2024.txt
-│   ├── hr_tech_workforce_platforms_2024.txt
-│   ├── saas_market_analysis_2024.txt
-│   ├── tech_startup_funding_news.txt
+├── sample_docs/                     # Sample market intelligence documents (19 files)
+│   ├── *.txt                        # 14 text-based competitive intelligence reports
+│   ├── *.pdf                        # 5 PDF reports (generated with reportlab)
 │   └── README.md
 ├── Tasks/specs/                     # Project specifications
-│   └── contract-analysis-pipeline/
-│       ├── .config.kiro
+│   └── Market-analysis-pipeline/
 │       ├── requirements.md
 │       ├── design.md
 │       └── tasks.md
 ├── deploy.ps1                       # Main pipeline deployment script
-├── deploy-dashboard.ps1             # Dashboard EC2 deployment script
-├── copy-app-to-ec2.ps1             # Copy dashboard app to EC2 via SSM
+├── deploy-dashboard.ps1             # Dashboard EC2 infrastructure deployment
+├── copy-app-to-ec2.ps1             # Copy dashboard app + config to EC2 via SSM
 ├── .gitignore
 └── README.md
 ```
@@ -309,21 +315,12 @@ Critical errors trigger SNS notifications to the configured email address.
 
 ### Sample Documents
 
-The `sample_docs/` directory contains 14 market intelligence documents covering:
-- `competitor_report_q1_2024.txt`: Quarterly competitor analysis (cloud services)
-- `saas_market_analysis_2024.txt`: SaaS market trends and competitive landscape
-- `tech_startup_funding_news.txt`: Startup funding announcements
-- `competitive_intelligence_facebook.txt`: Meta/Facebook competitive intelligence
-- `cybersecurity_market_q2_2024.txt`: Cybersecurity market analysis
-- `ai_infrastructure_competitive_report.txt`: AI infrastructure competitive report
-- `ecommerce_platform_analysis_2024.txt`: E-commerce platform market
-- `devops_toolchain_market_2024.txt`: DevOps toolchain market
-- `healthcare_saas_competitive_2024.txt`: Healthcare SaaS market
-- `fintech_payments_landscape_2024.txt`: FinTech payments landscape
-- `data_analytics_platforms_2024.txt`: Data analytics platforms
-- `edge_computing_iot_market_2024.txt`: Edge computing and IoT market
-- `hr_tech_workforce_platforms_2024.txt`: HR tech and workforce platforms
-- `green_tech_sustainability_market_2024.txt`: Green tech and sustainability
+The `sample_docs/` directory contains 19 market intelligence documents (14 TXT + 5 PDF) covering:
+- Cloud infrastructure, cybersecurity, AI infrastructure, e-commerce platforms
+- DevOps toolchains, healthcare SaaS, FinTech payments, data analytics
+- Edge computing/IoT, HR tech, green tech/sustainability
+- Digital advertising, semiconductor industry, enterprise AI adoption
+- Supply chain technology, SaaS market analysis, startup funding, competitor reports
 
 ### Upload Test Documents
 
@@ -350,13 +347,6 @@ Check CloudWatch Logs:
 ```bash
 aws logs tail /aws/lambda/market-analysis-orchestrator-lambda-dev --follow
 ```
-
-### Textract Failures
-
-Common issues:
-- Unsupported file format (use PDF, PNG, JPEG, TIFF, or TXT)
-- File size exceeds 10MB limit
-- Corrupted or password-protected documents
 
 ### Bedrock Analysis Issues
 

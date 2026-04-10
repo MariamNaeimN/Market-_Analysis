@@ -5,7 +5,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import json
+import os
 from decimal import Decimal
+
+MARKET_BUCKET = os.environ.get('MARKET_BUCKET', 'market-analysis-markets-dev-193786182229')
+WEBSOCKET_URL = os.environ.get('WEBSOCKET_URL', 'wss://h66b1xarjc.execute-api.us-east-1.amazonaws.com/prod')
 
 st.set_page_config(
     page_title="Market Intelligence Dashboard",
@@ -77,7 +81,6 @@ def decimal_to_float(obj):
     if isinstance(obj, Decimal): return float(obj)
     raise TypeError
 
-@st.cache_data(ttl=30)
 def load_insights():
     table = init_aws_clients()
     try:
@@ -124,9 +127,8 @@ def main():
     st.markdown('<div class="main-header">📊 Market Intelligence Dashboard</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Real-time competitive intelligence and market insights</div>', unsafe_allow_html=True)
 
-    with st.spinner('Loading...'):
-        items = load_insights()
-        insights = parse_insights(items)
+    items = load_insights()
+    insights = parse_insights(items)
 
     if not insights:
         st.warning("No insights found. Upload documents to S3 to generate market intelligence.")
@@ -134,30 +136,45 @@ def main():
 
     all_docs = sorted(set(i['documentId'] for i in insights))
 
-    # --- Sidebar: checkbox filters ---
     with st.sidebar:
         st.markdown("## 🎯 Filters")
         st.markdown("---")
 
-        # Time period radio
         st.markdown('<div class="sidebar-section">📅 Time Period</div>', unsafe_allow_html=True)
         date_filter = st.radio("Period", ["All time", "Last 7 days", "Last 30 days", "Last 90 days"],
                                index=0, label_visibility="collapsed")
         st.markdown("---")
 
-        # Document checkboxes
         st.markdown('<div class="sidebar-section">📄 Documents</div>', unsafe_allow_html=True)
-        all_doc_on = st.checkbox("Select All", value=True, key="all_docs")
+        st.caption(f"{len(all_docs)} documents")
+        all_doc_on = st.toggle("Select All", value=True, key="all_docs")
         if all_doc_on:
             selected_docs = list(all_docs)
-            for doc in all_docs:
-                st.checkbox(doc, value=True, key=f"doc_{doc}", disabled=True)
         else:
-            selected_docs = []
-            for doc in all_docs:
-                checked = st.checkbox(doc, value=False, key=f"doc_{doc}")
-                if checked:
-                    selected_docs.append(doc)
+            selected_docs = st.multiselect(
+                "Filter documents",
+                options=all_docs,
+                default=[],
+                placeholder="Search documents...",
+                label_visibility="collapsed"
+            )
+
+        st.markdown("---")
+        st.markdown('<div class="sidebar-section">📤 Upload Document</div>', unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("Drop a file to analyze",
+                                         label_visibility="collapsed")
+        if uploaded_file is not None:
+            upload_key = f"uploaded_{uploaded_file.name}_{uploaded_file.size}"
+            if upload_key not in st.session_state:
+                try:
+                    s3 = get_s3_client()
+                    s3.put_object(Bucket=MARKET_BUCKET, Key=uploaded_file.name, Body=uploaded_file.getvalue())
+                    st.session_state[upload_key] = True
+                    st.success(f"Uploaded {uploaded_file.name}")
+                except Exception as e:
+                    st.error(f"Upload failed: {str(e)}")
+            else:
+                st.success(f"Uploaded {uploaded_file.name}")
 
     # Apply filters
     now_ts = int(datetime.utcnow().timestamp())
@@ -186,6 +203,28 @@ def main():
     with tab3: show_financial(filtered)
     with tab4: show_risks(filtered)
     with tab5: show_documents(filtered)
+
+    # WebSocket: reload only when DynamoDB changes (insert/modify/delete)
+    import streamlit.components.v1 as components
+    components.html(f"""
+    <script>
+    (function() {{
+        if (window._wsSetup) return;
+        window._wsSetup = true;
+        function connect() {{
+            var ws = new WebSocket("{WEBSOCKET_URL}");
+            ws.onmessage = function() {{
+                window.parent.location.reload();
+            }};
+            ws.onclose = function() {{
+                setTimeout(connect, 5000);
+            }};
+            ws.onerror = function() {{ ws.close(); }};
+        }}
+        connect();
+    }})();
+    </script>
+    """, height=0)
 
 def show_overview(insights):
     st.markdown("### Market Intelligence Overview")
@@ -284,8 +323,8 @@ def show_risks(insights):
             row = {
                 'Competitor': ins['partyName'],
                 'Document': ins['documentId'],
-                'Risk Type': r.get('riskType', r.get('type', 'Unknown')),
                 'Type': r.get('type', 'Unknown'),
+                'Risk/Opportunity Type': r.get('riskType', r.get('type', 'Unknown')),
                 'Severity': r.get('severity', '—'),
                 'Potential': r.get('potential', '—'),
                 'Description': r.get('description', 'N/A')
@@ -296,9 +335,9 @@ def show_risks(insights):
         df = df.fillna('—').replace('None', '—')
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("##### 📊 Risk Type Distribution")
-            rc = df['Risk Type'].value_counts().reset_index(); rc.columns = ['Risk Type','Count']
-            fig = px.pie(rc, values='Count', names='Risk Type', hole=0.4,
+            st.markdown("##### 📊 Risk/Opportunity Type Distribution")
+            rc = df['Risk/Opportunity Type'].value_counts().reset_index(); rc.columns = ['Risk/Opportunity Type','Count']
+            fig = px.pie(rc, values='Count', names='Risk/Opportunity Type', hole=0.4,
                         color_discrete_sequence=px.colors.sequential.RdBu)
             fig.update_layout(margin=dict(l=0,r=0,t=30,b=0), height=300,
                               paper_bgcolor='rgba(0,0,0,0)', font_color='#909090')
@@ -465,6 +504,8 @@ def show_documents(insights):
             # Add any extra columns not in the preferred order
             col_order += [c for c in df.columns if c not in col_order]
             df = df[col_order]
+            # Rename riskType column for display
+            df = df.rename(columns={'riskType': 'Risk/Opportunity Type'})
             # Replace None/NaN with dash
             df = df.fillna('—')
             df = df.replace('None', '—')

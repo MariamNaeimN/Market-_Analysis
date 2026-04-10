@@ -26,7 +26,7 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 SYNC_THRESHOLD_MB = 1
 SYNC_THRESHOLD_BYTES = SYNC_THRESHOLD_MB * 1024 * 1024
 MAX_RETRIES = 3
-BEDROCK_MODEL_ID = 'us.anthropic.claude-sonnet-4-20250514-v1:0'
+BEDROCK_MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0'
 BEDROCK_TIMEOUT = 30
 
 def lambda_handler(event, context):
@@ -48,7 +48,7 @@ def lambda_handler(event, context):
         # Extract text using Textract
         extracted_text = extract_text_with_textract(bucket, key, job_id)
         
-        # Analyze contract with Bedrock
+        # Analyze with Bedrock
         analysis_results = analyze_with_bedrock(extracted_text, job_id)
         
         # Invoke Parser Lambda
@@ -117,30 +117,56 @@ def validate_file(bucket: str, key: str) -> None:
         raise ValueError(f"Failed to validate file: {e}")
 
 def extract_text_with_textract(bucket: str, key: str, job_id: str) -> str:
-    """Extract text from document using AWS Textract"""
-    # Check if file is a text file - if so, read directly from S3
+    """Extract text from documents. Textract for supported formats, direct S3 read for others."""
     file_ext = os.path.splitext(key)[1].lower()
-    if file_ext in ['.txt', '.text']:
-        log_info(f"Job {job_id}: Text file detected, reading directly from S3")
+    
+    # Textract-supported formats
+    textract_formats = ['.pdf', '.png', '.jpg', '.jpeg', '.tiff', '.tif']
+    
+    if file_ext in textract_formats:
+        # Use Textract: sync for small files, async for large
+        response = s3_client.head_object(Bucket=bucket, Key=key)
+        file_size = response['ContentLength']
+        
         try:
-            response = s3_client.get_object(Bucket=bucket, Key=key)
-            text_content = response['Body'].read().decode('utf-8')
-            log_info(f"Job {job_id}: Read {len(text_content)} characters from text file")
-            return text_content
+            if file_size <= SYNC_THRESHOLD_BYTES:
+                return extract_text_sync(bucket, key, job_id)
+            else:
+                return extract_text_async(bucket, key, job_id)
         except Exception as e:
-            raise Exception(f"Failed to read text file from S3: {e}")
-    
-    # For non-text files, use Textract
-    # Get file size to determine sync vs async
-    response = s3_client.head_object(Bucket=bucket, Key=key)
-    file_size = response['ContentLength']
-    
-    if file_size <= SYNC_THRESHOLD_BYTES:
-        # Use synchronous API for small files
-        return extract_text_sync(bucket, key, job_id)
+            # Sync failed — try async as fallback for PDFs
+            if 'UnsupportedDocument' in str(e) and file_size <= SYNC_THRESHOLD_BYTES:
+                log_warning(f"Job {job_id}: Sync Textract failed, trying async")
+                try:
+                    return extract_text_async(bucket, key, job_id)
+                except Exception as e2:
+                    log_warning(f"Job {job_id}: Async Textract also failed: {e2}")
+            else:
+                log_warning(f"Job {job_id}: Textract failed: {e}")
+            
+            # Last resort: read raw file content
+            log_warning(f"Job {job_id}: Falling back to raw file read")
+            return _read_raw_from_s3(bucket, key, job_id)
     else:
-        # Use asynchronous API for large files
-        return extract_text_async(bucket, key, job_id)
+        # Non-Textract format: read directly from S3
+        log_info(f"Job {job_id}: File type {file_ext} not supported by Textract, reading from S3")
+        return _read_raw_from_s3(bucket, key, job_id)
+
+
+def _read_raw_from_s3(bucket: str, key: str, job_id: str) -> str:
+    """Read file content directly from S3 as text."""
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+        raw = response['Body'].read()
+        # Try UTF-8 first, fall back to latin-1
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            text = raw.decode('latin-1', errors='ignore')
+        log_info(f"Job {job_id}: Read {len(text)} characters from S3")
+        return text
+    except Exception as e:
+        raise Exception(f"Failed to read file from S3: {e}")
 
 def extract_text_sync(bucket: str, key: str, job_id: str) -> str:
     """Synchronous text extraction for files <= 1MB"""
@@ -265,10 +291,7 @@ def analyze_with_bedrock(text: str, job_id: str) -> Dict[str, Any]:
     log_info(f"Job {job_id}: Starting Bedrock analysis")
     
     # Construct analysis prompt
-    prompt = f"""Analyze the following document (competitor report, news feed, or market document) and extract structured market intelligence in JSON format.
-
-Document Text:
-{text[:50000]}  
+    analysis_instruction = """Analyze the following document (competitor report, news feed, or market document) and extract structured market intelligence in JSON format.
 
 Please identify and extract:
 1. Competitors mentioned (company names and their roles/positions in the market)
@@ -278,43 +301,40 @@ Please identify and extract:
 5. Market risks and opportunities (competitive threats, market trends, regulatory changes)
 
 Return the analysis as a JSON object with the following structure:
-{{
+{
   "parties": [
-    {{"name": "Company/Competitor Name", "role": "Market Position/Role"}}
+    {"name": "Company/Competitor Name", "role": "Market Position/Role"}
   ],
-  "dates": {{
+  "dates": {
     "effectiveDate": "YYYY-MM-DD or null (primary date of document/event)",
     "terminationDate": "YYYY-MM-DD or null (end date if applicable)",
     "keyDates": [
-      {{"date": "YYYY-MM-DD", "event": "Description of the event or milestone"}}
+      {"date": "YYYY-MM-DD", "event": "Description of the event or milestone"}
     ]
-  }},
+  },
   "paymentTerms": [
-    {{"description": "Financial metric description (revenue, funding, pricing, etc.)", "amount": "Amount with currency or null"}}
+    {"description": "Financial metric description (revenue, funding, pricing, etc.)", "amount": "Amount with currency or null"}
   ],
   "obligations": [
-    {{"party": "Company Name", "obligation": "Strategic initiative or commitment"}}
+    {"party": "Company Name", "obligation": "Strategic initiative or commitment"}
   ],
   "risks": [
-    {{"type": "Risk or Opportunity", "riskType": "Category such as Regulatory, Competition, Financial, Technology, Market, Operational, etc.", "severity": "High/Medium/Low (for risks only)", "potential": "High/Medium/Low (for opportunities only)", "description": "Detailed description of market risk or opportunity"}}
+    {"type": "Risk or Opportunity", "riskType": "Category such as Regulatory, Competition, Financial, Technology, Market, Operational, etc.", "severity": "High/Medium/Low (for risks only)", "potential": "High/Medium/Low (for opportunities only)", "description": "Detailed description of market risk or opportunity"}
   ]
-}}
+}
 
-If any information is not found, use null or empty arrays as appropriate. Focus on extracting actionable market intelligence."""
+If any information is not found, use null or empty arrays as appropriate. Focus on extracting actionable market intelligence. IMPORTANT: Only extract information that is explicitly stated in the document. Do not infer, estimate, or generate any data that is not directly present in the text. If a value is not clearly stated, use null."""
     
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            # Invoke Bedrock model
+            # Build message content
+            content = f"{analysis_instruction}\n\nDocument Text:\n{text[:50000]}"
+            
             request_body = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": 4096,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.1
+                "messages": [{"role": "user", "content": content}],
+                "temperature": 0.0
             }
             
             response = bedrock_runtime.invoke_model(

@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: WebSocket API Gateway for real-time dashboard updates via DynamoDB Streams
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  ProjectName:
+    Type: String
+    Default: market-analysis
+  InsightsTableName:
+    Type: String
+    Default: market-analysis-market-insights-dev
+  InsightsStreamArn:
+    Type: String
+    Description: DynamoDB Stream ARN for the insights table
+  LambdaCodeBucket:
+    Type: String
+    Default: your-lambda-code-bucket-us-east-1
+
+Resources:
+
+  # DynamoDB table to track WebSocket connections
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-ws-connections-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # WebSocket API
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ProjectName}-ws-${Environment}'
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: '$request.body.action'
+
+  # Connect route
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$connect'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${ConnectIntegration}'
+
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectFunction.Arn}/invocations'
+
+  # Disconnect route
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$disconnect'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DisconnectFunction.Arn}/invocations'
+
+  # Default route
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$default'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DefaultIntegration}'
+
+  DefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectFunction.Arn}/invocations'
+
+  # Deployment and Stage
+  WebSocketDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+      - DefaultRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      DeploymentId: !Ref WebSocketDeployment
+
+
+  # IAM Role for WebSocket Lambdas
+  WebSocketLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ws-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: ConnectionsTableAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                Resource: !GetAtt ConnectionsTable.Arn
+        - PolicyName: ManageConnections
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # IAM Role for Stream Notifier Lambda
+  NotifierLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ws-notifier-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: ConnectionsTableRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt ConnectionsTable.Arn
+        - PolicyName: DynamoDBStreamRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !Ref InsightsStreamArn
+        - PolicyName: ManageConnections
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # Connect Lambda
+  ConnectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-ws-connect-${Environment}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt WebSocketLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+      Code:
+        ZipFile: |
+          import boto3, os, time
+          table = boto3.resource('dynamodb').Table(os.environ['CONNECTIONS_TABLE'])
+          def handler(event, context):
+              connection_id = event['requestContext']['connectionId']
+              ttl = int(time.time()) + 86400  # 24h TTL
+              table.put_item(Item={'connectionId': connection_id, 'ttl': ttl})
+              return {'statusCode': 200}
+
+  # Disconnect Lambda
+  DisconnectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-ws-disconnect-${Environment}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt WebSocketLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+      Code:
+        ZipFile: |
+          import boto3, os
+          table = boto3.resource('dynamodb').Table(os.environ['CONNECTIONS_TABLE'])
+          def handler(event, context):
+              connection_id = event['requestContext']['connectionId']
+              table.delete_item(Key={'connectionId': connection_id})
+              return {'statusCode': 200}
+
+  # Notifier Lambda (triggered by DynamoDB Streams)
+  NotifierFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-ws-notifier-${Environment}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt NotifierLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          WEBSOCKET_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+      Code:
+        ZipFile: |
+          import boto3, json, os
+          apigw = boto3.client('apigatewaymanagementapi',
+              endpoint_url=os.environ['WEBSOCKET_ENDPOINT'])
+          connections_table = boto3.resource('dynamodb').Table(os.environ['CONNECTIONS_TABLE'])
+          def handler(event, context):
+              conns = connections_table.scan()['Items']
+              for record in event['Records']:
+                  if record['eventName'] in ('INSERT', 'MODIFY', 'REMOVE'):
+                      message = json.dumps({'type': 'data_changed', 'eventName': record['eventName']})
+                      for conn in conns:
+                          try:
+                              apigw.post_to_connection(
+                                  ConnectionId=conn['connectionId'],
+                                  Data=message.encode('utf-8'))
+                          except apigw.exceptions.GoneException:
+                              connections_table.delete_item(Key={'connectionId': conn['connectionId']})
+                          except Exception:
+                              pass
+              return {'statusCode': 200}
+
+
+  # Lambda permissions for API Gateway
+  ConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  DisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DisconnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # DynamoDB Stream Event Source Mapping
+  NotifierEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Ref InsightsStreamArn
+      FunctionName: !Ref NotifierFunction
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 1
+
+Outputs:
+  WebSocketUrl:
+    Description: WebSocket URL for dashboard
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  WebSocketApiId:
+    Description: WebSocket API ID
+    Value: !Ref WebSocketApi
+  ConnectionsTableName:
+    Description: Connections DynamoDB table
+    Value: !Ref ConnectionsTable
