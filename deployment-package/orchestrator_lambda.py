@@ -229,8 +229,8 @@ def extract_text_async(bucket: str, key: str, job_id: str) -> str:
 
 def poll_textract_job(textract_job_id: str, job_id: str) -> str:
     """Poll Textract async job until completion"""
-    max_poll_attempts = 60  # 5 minutes with 5s intervals
-    poll_interval = 5
+    max_poll_attempts = 150  # 5 minutes with 2s intervals
+    poll_interval = 2
     
     for poll_attempt in range(max_poll_attempts):
         try:
