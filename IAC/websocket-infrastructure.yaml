@@ -8,15 +8,9 @@ Parameters:
   ProjectName:
     Type: String
     Default: market-analysis
-  InsightsTableName:
-    Type: String
-    Default: market-analysis-market-insights-dev
   InsightsStreamArn:
     Type: String
     Description: DynamoDB Stream ARN for the insights table
-  LambdaCodeBucket:
-    Type: String
-    Default: your-lambda-code-bucket-us-east-1
 
 Resources:
 
@@ -76,6 +70,22 @@ Resources:
       IntegrationType: AWS_PROXY
       IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DisconnectFunction.Arn}/invocations'
 
+  # Ping route - handles keepalive pings from the dashboard JS client
+  PingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: 'ping'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${PingIntegration}'
+
+  PingIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PingFunction.Arn}/invocations'
+
   # Default route
   DefaultRoute:
     Type: AWS::ApiGatewayV2::Route
@@ -90,7 +100,7 @@ Resources:
     Properties:
       ApiId: !Ref WebSocketApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectFunction.Arn}/invocations'
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PingFunction.Arn}/invocations'
 
   # Deployment and Stage
   WebSocketDeployment:
@@ -98,6 +108,7 @@ Resources:
     DependsOn:
       - ConnectRoute
       - DisconnectRoute
+      - PingRoute
       - DefaultRoute
     Properties:
       ApiId: !Ref WebSocketApi
@@ -267,6 +278,20 @@ Resources:
                               pass
               return {'statusCode': 200}
 
+  # Ping Lambda - responds to keepalive pings from the dashboard JS client (5-min interval)
+  PingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-ws-ping-${Environment}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt WebSocketLambdaRole.Arn
+      Timeout: 10
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {'statusCode': 200, 'body': 'pong'}
+
 
   # Lambda permissions for API Gateway
   ConnectPermission:
@@ -281,6 +306,14 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref DisconnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  PingPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PingFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'

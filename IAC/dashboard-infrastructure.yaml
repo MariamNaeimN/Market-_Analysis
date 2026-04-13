@@ -154,6 +154,7 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:GetItem
                   - dynamodb:BatchGetItem
+                  - dynamodb:DeleteItem
                 Resource:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/market-analysis-market-insights-${Environment}'
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/market-analysis-market-insights-${Environment}/index/*'
@@ -222,6 +223,7 @@ Resources:
           # Create requirements.txt
           cat > requirements.txt << 'EOF'
           streamlit==1.31.0
+          streamlit-autorefresh
           boto3==1.34.51
           pandas==2.2.0
           plotly==5.18.0
@@ -326,12 +328,74 @@ Resources:
           MinTTL: 0
           DefaultTTL: 0
           MaxTTL: 0
+        CacheBehaviors:
+          # Streamlit WebSocket transport - required for real-time UI updates
+          - PathPattern: '_stcore/stream'
+            TargetOriginId: EC2Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            ForwardedValues:
+              QueryString: true
+              Cookies:
+                Forward: all
+              Headers:
+                - '*'
+            MinTTL: 0
+            DefaultTTL: 0
+            MaxTTL: 0
+          # Streamlit static assets - cache for performance
+          - PathPattern: 'static/*'
+            TargetOriginId: EC2Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            ForwardedValues:
+              QueryString: false
+              Cookies:
+                Forward: none
+            MinTTL: 86400
+            DefaultTTL: 86400
+            MaxTTL: 604800
+            Compress: true
+          # Streamlit health check endpoint - no cache
+          - PathPattern: 'healthz'
+            TargetOriginId: EC2Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            ForwardedValues:
+              QueryString: false
+              Cookies:
+                Forward: none
+            MinTTL: 0
+            DefaultTTL: 0
+            MaxTTL: 0
         Origins:
           - Id: EC2Origin
             DomainName: !GetAtt DashboardEC2Instance.PublicDnsName
             CustomOriginConfig:
               HTTPPort: 8501
               OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
         PriceClass: PriceClass_100
         ViewerCertificate:
           CloudFrontDefaultCertificate: true

@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import boto3
 import pandas as pd
 import plotly.express as px
@@ -9,7 +10,7 @@ import os
 from decimal import Decimal
 
 MARKET_BUCKET = os.environ.get('MARKET_BUCKET', 'market-analysis-markets-dev-193786182229')
-WEBSOCKET_URL = os.environ.get('WEBSOCKET_URL', 'wss://h66b1xarjc.execute-api.us-east-1.amazonaws.com/prod')
+WS_RELOAD_URL = os.environ.get('WS_RELOAD_URL', '')
 
 st.set_page_config(
     page_title="Market Intelligence Dashboard",
@@ -17,6 +18,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+st_autorefresh(interval=5000, limit=0, key="data_autorefresh")
 
 st.markdown("""
 <style>
@@ -64,7 +67,10 @@ st.markdown("""
     hr { border-color: #1a1a24 !important; }
 
     /* === Hide chrome === */
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
+    /* Keep header visible for sidebar toggle arrow */
+    header[data-testid="stHeader"] { background: transparent !important; }
+    header[data-testid="stHeader"] button[kind="header"] { visibility: visible !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,6 +87,18 @@ def decimal_to_float(obj):
     if isinstance(obj, Decimal): return float(obj)
     raise TypeError
 
+def clean_display_name(s3_key):
+    """Strip S3 path prefixes, returning only the filename."""
+    return s3_key.split('/')[-1] if s3_key else s3_key
+
+def find_by_id(insights, doc_id):
+    """Locate a document by its ID in the dataset. Returns index or 0 if not found."""
+    for idx, item in enumerate(insights):
+        if item.get('documentId') == doc_id:
+            return idx
+    return 0
+
+@st.cache_data(ttl=0)
 def load_insights():
     table = init_aws_clients()
     try:
@@ -160,21 +178,26 @@ def main():
             )
 
         st.markdown("---")
-        st.markdown('<div class="sidebar-section">📤 Upload Document</div>', unsafe_allow_html=True)
-        uploaded_file = st.file_uploader("Drop a file to analyze",
-                                         label_visibility="collapsed")
-        if uploaded_file is not None:
-            upload_key = f"uploaded_{uploaded_file.name}_{uploaded_file.size}"
-            if upload_key not in st.session_state:
+        st.markdown('<div class="sidebar-section">📤 Upload Documents</div>', unsafe_allow_html=True)
+        if 'uploader_key' not in st.session_state:
+            st.session_state.uploader_key = 0
+        uploaded_files = st.file_uploader("Drop files to analyze",
+                                          accept_multiple_files=True,
+                                          label_visibility="collapsed",
+                                          key=f"file_uploader_{st.session_state.uploader_key}")
+        if uploaded_files:
+            s3 = get_s3_client()
+            all_succeeded = True
+            for f in uploaded_files:
                 try:
-                    s3 = get_s3_client()
-                    s3.put_object(Bucket=MARKET_BUCKET, Key=uploaded_file.name, Body=uploaded_file.getvalue())
-                    st.session_state[upload_key] = True
-                    st.success(f"Uploaded {uploaded_file.name}")
+                    s3.put_object(Bucket=MARKET_BUCKET, Key=f.name, Body=f.getvalue())
+                    st.success(f"Uploaded {f.name}")
                 except Exception as e:
-                    st.error(f"Upload failed: {str(e)}")
-            else:
-                st.success(f"Uploaded {uploaded_file.name}")
+                    st.error(f"Upload failed for {f.name}: {str(e)}")
+                    all_succeeded = False
+            if all_succeeded:
+                st.session_state.uploader_key += 1
+                st.rerun()
 
     # Apply filters
     now_ts = int(datetime.utcnow().timestamp())
@@ -205,26 +228,49 @@ def main():
     with tab5: show_documents(filtered)
 
     # WebSocket: reload only when DynamoDB changes (insert/modify/delete)
-    import streamlit.components.v1 as components
-    components.html(f"""
-    <script>
-    (function() {{
-        if (window._wsSetup) return;
-        window._wsSetup = true;
-        function connect() {{
-            var ws = new WebSocket("{WEBSOCKET_URL}");
-            ws.onmessage = function() {{
-                window.parent.location.reload();
-            }};
-            ws.onclose = function() {{
-                setTimeout(connect, 5000);
-            }};
-            ws.onerror = function() {{ ws.close(); }};
-        }}
-        connect();
-    }})();
-    </script>
-    """, height=0)
+    if WS_RELOAD_URL:
+        import streamlit.components.v1 as components
+        components.html(f"""
+        <script>
+        (function() {{
+            if (window._wsSetup) return;
+            window._wsSetup = true;
+            var delay = 1000;
+            var maxDelay = 30000;
+            var pingInterval = 300000;
+
+            function connect() {{
+                var ws = new WebSocket("{WS_RELOAD_URL}");
+                var pingTimer = null;
+
+                ws.onopen = function() {{
+                    delay = 1000;
+                    pingTimer = setInterval(function() {{
+                        if (ws.readyState === WebSocket.OPEN) {{
+                            ws.send(JSON.stringify({{action: "ping"}}));
+                        }}
+                    }}, pingInterval);
+                }};
+
+                ws.onmessage = function(evt) {{
+                    var msg = JSON.parse(evt.data);
+                    if (msg.type === "data_changed") {{
+                        window.parent.location.reload();
+                    }}
+                }};
+
+                ws.onclose = function() {{
+                    if (pingTimer) clearInterval(pingTimer);
+                    setTimeout(connect, delay);
+                    delay = Math.min(delay * 2, maxDelay);
+                }};
+
+                ws.onerror = function() {{ ws.close(); }};
+            }}
+            connect();
+        }})();
+        </script>
+        """, height=0)
 
 def show_overview(insights):
     st.markdown("### Market Intelligence Overview")
@@ -262,20 +308,62 @@ def show_overview(insights):
         else: st.info("No data")
 
     st.markdown("##### 🔔 Recent Insights")
-    recent = sorted(insights, key=lambda x: x['uploadTimestamp'], reverse=True)[:10]
-    for idx, ins in enumerate(recent):
+    recent = sorted(insights, key=lambda x: x['uploadTimestamp'], reverse=True)
+
+    # Pagination
+    PAGE_SIZE = 10
+    total_pages = max(1, (len(recent) + PAGE_SIZE - 1) // PAGE_SIZE)
+    if 'insights_page' not in st.session_state:
+        st.session_state.insights_page = 1
+
+    page = st.session_state.insights_page
+    start = (page - 1) * PAGE_SIZE
+    end = start + PAGE_SIZE
+    page_items = recent[start:end]
+
+    st.caption(f"Showing {start + 1}–{min(end, len(recent))} of {len(recent)}")
+
+    for idx, ins in enumerate(page_items):
+        global_idx = start + idx
         s3m = ins.get('s3Metadata',{}); bucket = s3m.get('bucket',''); key = s3m.get('key','')
-        doc_name = key.split('/')[-1] if key else ins['documentId']
+        doc_name = clean_display_name(key) if key else ins['documentId']
         ar = ins['analysisResults']
         sm = f"{len(ar.get('parties',[]))} parties · {len(ar.get('risks',[]))} risks · {len(ar.get('obligations',[]))} initiatives"
         with st.expander(f"📄 {ins['documentId']} — {ins['partyName']} | {ins['effectiveDate']}"):
             st.markdown(f"**Competitor:** {ins['partyName']}  ·  **Date:** {ins['effectiveDate']}  ·  **Processed:** {ins['processingTimestamp']}")
             st.markdown(f"**Summary:** {sm}")
-            if bucket and key:
-                content = download_s3_document(bucket, key)
-                if content:
-                    st.download_button("⬇️ Download", data=content, file_name=doc_name,
-                                      mime="application/octet-stream", key=f"dl_{idx}")
+            btn_col1, btn_col2 = st.columns([1, 1])
+            with btn_col1:
+                if bucket and key:
+                    content = download_s3_document(bucket, key)
+                    if content:
+                        st.download_button("⬇️ Download", data=content, file_name=doc_name,
+                                          mime="application/octet-stream", key=f"dl_{global_idx}")
+            with btn_col2:
+                if st.button("🗑️ Delete", key=f"del_{global_idx}", type="secondary"):
+                    try:
+                        table = init_aws_clients()
+                        table.delete_item(Key={'insightId': ins['insightId']})
+                        st.success(f"Deleted {ins['documentId']}")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {str(e)}")
+
+    # Page navigation
+    nav_cols = st.columns([1, 3, 1])
+    with nav_cols[0]:
+        if page > 1:
+            if st.button("← Previous", key="prev_page"):
+                st.session_state.insights_page = page - 1
+                st.rerun()
+    with nav_cols[1]:
+        st.markdown(f"<div style='text-align:center; color:#707080; font-size:0.8rem;'>Page {page} of {total_pages}</div>", unsafe_allow_html=True)
+    with nav_cols[2]:
+        if page < total_pages:
+            if st.button("Next →", key="next_page"):
+                st.session_state.insights_page = page + 1
+                st.rerun()
 
 def show_competitors(insights):
     st.markdown("### Competitor Intelligence")
@@ -388,11 +476,25 @@ def render_as_table(data, label=None):
 def show_documents(insights):
     st.markdown("### Document Explorer")
     doc_map = {i['documentId']: i for i in insights}
-    sel = st.selectbox("Select a document", options=list(doc_map.keys()))
-    if not sel: return
+    doc_ids = list(doc_map.keys())
+    if not doc_ids:
+        st.info("No documents available.")
+        return
+
+    # Initialize selected_contract_id on first load
+    if 'selected_contract_id' not in st.session_state:
+        st.session_state.selected_contract_id = doc_ids[0]
+
+    # Restore selection after refresh using find_by_id
+    idx = find_by_id(insights, st.session_state.selected_contract_id)
+    sel = st.selectbox("Select a document", options=doc_ids, index=idx)
+
+    # Update selected_contract_id when user selects a different document
+    st.session_state.selected_contract_id = sel
+
     ins = doc_map[sel]
     s3m = ins.get('s3Metadata',{}); bucket = s3m.get('bucket',''); key = s3m.get('key','')
-    doc_name = key.split('/')[-1] if key else sel
+    doc_name = clean_display_name(key) if key else sel
 
     c1, c2, c3 = st.columns([2,2,1])
     with c1:

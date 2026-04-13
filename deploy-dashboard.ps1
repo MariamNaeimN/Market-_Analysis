@@ -49,7 +49,7 @@ if ($KeyPairName) {
 
 aws cloudformation create-stack `
     --stack-name $StackName `
-    --template-body file://dashboard-infrastructure.yaml `
+    --template-body file://IAC/dashboard-infrastructure.yaml `
     --parameters $params `
     --capabilities CAPABILITY_NAMED_IAM `
     --tags Key=Environment,Value=$Environment Key=Project,Value=market-intelligence
@@ -59,7 +59,7 @@ if ($LASTEXITCODE -ne 0) {
     
     aws cloudformation update-stack `
         --stack-name $StackName `
-        --template-body file://dashboard-infrastructure.yaml `
+        --template-body file://IAC/dashboard-infrastructure.yaml `
         --parameters $params `
         --capabilities CAPABILITY_NAMED_IAM
     

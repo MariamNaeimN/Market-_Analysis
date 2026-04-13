@@ -3,6 +3,7 @@ import boto3
 import os
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, Any, Optional, List
 
 # Initialize AWS clients
@@ -205,8 +206,11 @@ def write_to_dynamodb(item: Dict[str, Any], job_id: str) -> None:
     log_info(f"Parser job {job_id}: Writing to DynamoDB")
     
     try:
+        # Convert floats to Decimal (DynamoDB doesn't support float)
+        sanitized_item = json.loads(json.dumps(item, default=str), parse_float=Decimal)
+        
         # Write item to DynamoDB
-        table.put_item(Item=item)
+        table.put_item(Item=sanitized_item)
         
         log_info(
             f"Parser job {job_id}: Successfully wrote insight {item['insightId']} "

@@ -23,6 +23,7 @@ if (-not (Test-Path "dashboard/app.py")) {
 
 # Check if config.toml exists
 $HasConfig = Test-Path "dashboard/.streamlit/config.toml"
+$HasRequirements = Test-Path "dashboard/requirements.txt"
 
 # Get instance ID
 Write-Host "Step 1: Getting EC2 instance details..." -ForegroundColor Yellow
@@ -44,6 +45,7 @@ Write-Host "Step 2: Uploading files to S3..." -ForegroundColor Yellow
 $S3Bucket = "your-lambda-code-bucket-us-east-1"
 $S3Key = "dashboard-app/app.py"
 $S3ConfigKey = "dashboard-app/config.toml"
+$S3RequirementsKey = "dashboard-app/requirements.txt"
 
 aws s3 cp dashboard/app.py "s3://$S3Bucket/$S3Key"
 
@@ -57,6 +59,11 @@ if ($HasConfig) {
     Write-Host "Uploaded config.toml to S3" -ForegroundColor Green
 }
 
+if ($HasRequirements) {
+    aws s3 cp "dashboard/requirements.txt" "s3://$S3Bucket/$S3RequirementsKey"
+    Write-Host "Uploaded requirements.txt to S3" -ForegroundColor Green
+}
+
 Write-Host "Uploaded to s3://$S3Bucket/$S3Key" -ForegroundColor Green
 Write-Host ""
 
@@ -68,6 +75,8 @@ $Commands = @(
     "aws s3 cp s3://$S3Bucket/$S3Key app.py",
     "mkdir -p .streamlit",
     "aws s3 cp s3://$S3Bucket/$S3ConfigKey .streamlit/config.toml || true",
+    "aws s3 cp s3://$S3Bucket/$S3RequirementsKey requirements.txt || true",
+    "python3.11 -m pip install -r requirements.txt 2>&1 || python3 -m pip install -r requirements.txt 2>&1",
     "chown -R ec2-user:ec2-user /opt/dashboard",
     "chmod 644 app.py",
     "sudo systemctl restart streamlit-dashboard",
@@ -163,3 +172,4 @@ Write-Host ""
 Write-Host "Cleaning up S3..." -ForegroundColor Yellow
 aws s3 rm "s3://$S3Bucket/$S3Key" --quiet
 aws s3 rm "s3://$S3Bucket/$S3ConfigKey" --quiet
+aws s3 rm "s3://$S3Bucket/$S3RequirementsKey" --quiet
